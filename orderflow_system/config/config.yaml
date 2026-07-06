@@ -18,6 +18,7 @@ data:
   # switch to "databento" or "ibkr" once you're running this on your own machine
   # with real credentials and network access.
   source: "synthetic"
+  synthetic_sessions: 2          # consecutive trading days to generate (need >=2 so day 2 has a prior-session VAL/VAH to reference)
   bar_interval_seconds: 60      # feature bars are built on 1-min aggregation of ticks
   session_start_utc: "13:30"    # adjust to your traded session (example: US day session)
   session_end_utc: "20:00"

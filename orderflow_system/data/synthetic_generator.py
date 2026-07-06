@@ -15,7 +15,8 @@ shape (rows into raw_ticks) so nothing downstream needs to change.
 """
 import duckdb
 import numpy as np
-from datetime import datetime, timedelta
+import pandas as pd
+from datetime import datetime, timedelta, date
 from pathlib import Path
 import sys
 
@@ -25,16 +26,23 @@ from database.schema import init_db
 
 
 def generate_session_ticks(symbol: str, tick_size: float, start_price: float,
-                            session_minutes: int = 390, seed: int = 42) -> list[dict]:
+                            session_date: date, session_minutes: int = 390,
+                            seed: int = 42, target_val: float | None = None,
+                            target_vah: float | None = None) -> tuple[list[dict], float, float]:
+    """Returns (ticks, val_price, vah_price). If target_val/target_vah are given
+    (the prior session's actual VAL/VAH), today's planted absorption events are
+    placed there instead of an arbitrary offset from today's start price — this
+    is what lets the VAL/VAH-absorption-reversal edge actually fire on day 2+
+    now that the feature engine correctly references the PRIOR session's levels."""
     rng = np.random.default_rng(seed)
     ticks = []
     price = start_price
-    t = datetime(2026, 7, 6, 13, 30, 0)
+    t = datetime(session_date.year, session_date.month, session_date.day, 13, 30, 0)
 
-    # Rough value area boundaries for this synthetic session, used to place
-    # deliberate absorption events at realistic spots.
-    val_price = start_price - 20 * tick_size
-    vah_price = start_price + 20 * tick_size
+    # Rough value area boundaries used to place deliberate absorption events at
+    # realistic spots. Use the prior session's real levels when available.
+    val_price = target_val if target_val is not None else start_price - 20 * tick_size
+    vah_price = target_vah if target_vah is not None else start_price + 20 * tick_size
 
     # Pre-plan a handful of absorption events near VAL/VAH
     absorption_minutes = sorted(rng.choice(range(30, session_minutes - 30), size=4, replace=False))
@@ -68,20 +76,59 @@ def generate_session_ticks(symbol: str, tick_size: float, start_price: float,
             })
         minute += 1
 
-    return ticks
+    return ticks, val_price, vah_price
 
 
-def load_synthetic_data(con: duckdb.DuckDBPyConnection, cfg: dict):
+def business_days_ending(end_date: date, n_sessions: int) -> list[date]:
+    """Last n_sessions weekdays up to and including end_date, oldest first."""
+    days = []
+    d = end_date
+    while len(days) < n_sessions:
+        if d.weekday() < 5:  # Mon-Fri
+            days.append(d)
+        d -= timedelta(days=1)
+    return list(reversed(days))
+
+
+def load_synthetic_data(con: duckdb.DuckDBPyConnection, cfg: dict, n_sessions: int | None = None):
+    """
+    Generates n_sessions consecutive trading days of synthetic ticks per symbol.
+    Each day's start price carries over (with a small random overnight gap) from
+    the previous day's close, so multi-day features (prior-session VAL/VAH) are
+    meaningful rather than arbitrary. Defaults to cfg['data']['synthetic_sessions']
+    (falls back to 2 — the minimum needed for the "prior session" edge to fire at
+    all, since day 1 has no prior session to reference).
+    """
+    if n_sessions is None:
+        n_sessions = cfg["data"].get("synthetic_sessions", 2)
+
+    end_date = date(2026, 7, 6)
+    session_dates = business_days_ending(end_date, n_sessions)
+
     for sym_cfg in cfg["symbols"]:
         symbol = sym_cfg["name"]
         tick_size = sym_cfg["tick_size"]
-        start_price = 20000.0 if symbol == "NQ" else 2400.0
-        ticks = generate_session_ticks(symbol, tick_size, start_price)
-        con.executemany(
-            "INSERT INTO raw_ticks (symbol, ts, price, size, aggressor) VALUES (?, ?, ?, ?, ?)",
-            [(t["symbol"], t["ts"], t["price"], t["size"], t["aggressor"]) for t in ticks]
-        )
-        print(f"  Loaded {len(ticks)} synthetic ticks for {symbol}")
+        price = 20000.0 if symbol == "NQ" else 2400.0
+        rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
+        total = 0
+        prev_val, prev_vah = None, None
+        for i, session_date in enumerate(session_dates):
+            seed = int(rng.integers(0, 2**31 - 1))
+            ticks, val_price, vah_price = generate_session_ticks(
+                symbol, tick_size, price, session_date, seed=seed,
+                target_val=prev_val, target_vah=prev_vah
+            )
+            # Vectorized insert via a DataFrame — con.executemany() with Python
+            # tuples is ~1000x slower in DuckDB (row-by-row) and doesn't scale
+            # past a session or two once you're generating backtest data.
+            df = pd.DataFrame(ticks)[["symbol", "ts", "price", "size", "aggressor"]]
+            con.execute("INSERT INTO raw_ticks SELECT * FROM df")
+            total += len(ticks)
+            # carry the day's closing price and its val/vah forward so tomorrow's
+            # planted absorption events reference today's actual levels
+            price = ticks[-1]["price"] + rng.normal(0, tick_size * 5)
+            prev_val, prev_vah = val_price, vah_price
+        print(f"  Loaded {total} synthetic ticks for {symbol} across {n_sessions} session(s)")
 
 
 if __name__ == "__main__":

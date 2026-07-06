@@ -25,7 +25,18 @@ That's the one thing only you can do, on your own machine.
 | Risk & position sizing | `live/risk_engine.py` | ✅ correct fixed-fractional sizing math |
 | Paper execution simulator | `live/paper_executor.py` | ✅ correctly walks forward to stop/target |
 | Trade journal | `journal/journal.py` | ✅ logs every decision + outcome, generates summary |
+| Walk-forward backtest | `backtest/engine.py` | ✅ runs the full pipeline across N synthetic sessions, splits into chronological folds, reports an overfitting-style verdict |
 | Full orchestrator | `main.py` | ✅ ran end-to-end, produced a complete journaled run |
+
+**Update since the initial build:** the feature engine was fixing a real bug — it was
+using the CURRENT (still-forming) session's own volume profile as a feature, which is
+look-ahead bias (you can't know today's finished POC/VAH/VAL until today's session is
+over). It now correctly references the PRIOR completed session's profile, matching the
+edge hypothesis in `config.yaml` ("price reaches prior session's VAL/VAH"). This means
+`data.synthetic_sessions` in config must be >= 2 (a lone day has no prior session to
+reference) — defaulted to 2. The synthetic generator was also updated to plant each
+day's absorption events near the previous day's actual VAL/VAH (instead of an arbitrary
+offset from that day's own price), so the edge still has something real to fire on.
 
 ## The one edge this system trades (V1)
 
@@ -86,26 +97,44 @@ It already works — `live/decision_engine.py` calls Gemini for real whenever
 as a fallback if the key is missing or a live call errors out. Just export
 the key and re-run.
 
+## Running the walk-forward backtest
+
+```bash
+python3 -m backtest.engine --sessions 80 --folds 5
+```
+
+This generates N consecutive synthetic trading sessions, runs the full pipeline
+(bars → profile → features → strategy filter → decision engine → paper
+execution) across all of them, then splits the resulting trade log into
+chronological folds and reports per-fold win rate / expectancy / P&L plus a
+verdict: `ROBUST`, `MODERATE`, `WEAK`, `INCONSISTENT`, `DEAD`, or
+`INSUFFICIENT_DATA` (fewer than 30 trades total — don't trust anything below
+that). **On synthetic data this only proves the mechanism works** — the
+setups are planted, so a good verdict here is not evidence of a real edge.
+Once `data.source` is `databento` or `ibkr`, point this at real history and
+the verdict actually means something. Note this build's decision thresholds
+are fixed in `config.yaml`, not fit to data — so right now this is an
+out-of-time consistency check, not overfitting protection. The moment you (or
+an AI) start tuning thresholds based on backtest results, you must tune only
+on train folds and judge only on held-out test folds, or you're just
+overfitting with extra steps.
+
 ## Realistic next steps, in order
 
 1. **Get real historical tick data flowing** (Databento) and re-run the
-   feature engine and strategy filter against it. See how often real
-   candidates actually occur — synthetic data was tuned to produce events,
-   real markets won't be so cooperative.
-2. **Backtest properly**: run the strategy filter + decision engine across
-   weeks/months of historical data, not just one session. Add walk-forward
-   validation (train/test split) before trusting any result — this is not
-   yet built, and is the most important thing to add before paper trading
-   with real-time signals.
-3. **Wire up IBKR paper account** for live tick ingestion during market hours,
+   feature engine, strategy filter, and `backtest.engine` against it. See how
+   often real candidates actually occur, and what the walk-forward verdict
+   says on real history — synthetic data was tuned to produce events, real
+   markets won't be so cooperative.
+2. **Wire up IBKR paper account** for live tick ingestion during market hours,
    replacing the synthetic generator, and run `main.py` on a schedule (e.g.
    every 1-5 minutes) instead of once.
-4. **Add Telegram alerting** (`alerts/` folder is scaffolded but empty) so you
+3. **Add Telegram alerting** (`alerts/` folder is scaffolded but empty) so you
    get notified in real time instead of watching a terminal.
-5. **Paper trade for real, for weeks** — 100 trades minimum before drawing any
+4. **Paper trade for real, for weeks** — 100 trades minimum before drawing any
    conclusion about whether this edge (or the AI's judgment on it) is any good.
-6. **Only then** consider a second strategy, an ensemble/ranking layer, or a
-   dashboard. Multiplying complexity before step 5 is exactly how these
+5. **Only then** consider a second strategy, an ensemble/ranking layer, or a
+   dashboard. Multiplying complexity before step 4 is exactly how these
    projects die — twenty untested strategies is not better than one tested one.
 
 ## Common mistakes this build deliberately avoids

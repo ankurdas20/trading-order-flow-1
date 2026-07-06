@@ -1,10 +1,17 @@
 """
-Core feature engine. Computes, per bar:
+Core feature engine. Computes, per bar, within its own trading session:
   - CVD (cumulative volume delta, session-anchored) and its slope
   - absorption flag + side (volume spike with minimal price movement)
-  - distance to session POC / VAH / VAL (in ticks)
+  - distance to the PRIOR session's POC / VAH / VAL (in ticks)
   - ADX + regime classification (trending vs ranging)
   - relative volume vs rolling average
+
+Distance-to-level features deliberately reference the PRIOR completed
+session's profile, never the current (still-forming) session's profile —
+using today's own profile as a feature for an intraday bar today is
+look-ahead bias, since the real POC/VAH/VAL for today isn't known until
+the session closes. This also matches the edge hypothesis in config.yaml
+("price reaches PRIOR session's VAL/VAH").
 
 This is the module your conviction decision (rule-based or AI) should be
 built on top of. Never feed raw ticks or raw bars directly to a decision
@@ -48,12 +55,14 @@ def compute_adx(df: pd.DataFrame, period: int) -> pd.Series:
     return adx
 
 
-def compute_features_for_symbol(bars: pd.DataFrame, profile_row: dict,
-                                  tick_size: float, cfg: dict) -> pd.DataFrame:
-    bars = bars.sort_values("bar_ts").reset_index(drop=True)
+def _compute_session_features(day_bars: pd.DataFrame, prior_profile: dict | None,
+                               tick_size: float, cfg: dict) -> pd.DataFrame:
+    """Computes features for a single session's bars, in isolation, so nothing
+    (CVD, rolling averages, ADX) leaks across session boundaries."""
+    bars = day_bars.sort_values("bar_ts").reset_index(drop=True)
     feat_cfg = cfg["features"]
 
-    # --- CVD: cumulative delta, anchored to session start (first bar of the day) ---
+    # --- CVD: cumulative delta, anchored to this session's start ---
     bars["cvd"] = bars["delta"].cumsum()
     lookback = feat_cfg["cvd_lookback_bars"]
     bars["cvd_slope"] = bars["cvd"].diff(lookback)
@@ -80,17 +89,17 @@ def compute_features_for_symbol(bars: pd.DataFrame, profile_row: dict,
 
     bars["absorption_side"] = bars.apply(absorption_side, axis=1)
 
-    # --- Distance to session levels (in ticks) ---
-    if profile_row:
-        bars["distance_to_poc"] = (bars["close"] - profile_row["poc"]) / tick_size
-        bars["distance_to_val"] = (bars["close"] - profile_row["val"]) / tick_size
-        bars["distance_to_vah"] = (bars["close"] - profile_row["vah"]) / tick_size
+    # --- Distance to PRIOR session's levels (in ticks) ---
+    if prior_profile:
+        bars["distance_to_poc"] = (bars["close"] - prior_profile["poc"]) / tick_size
+        bars["distance_to_val"] = (bars["close"] - prior_profile["val"]) / tick_size
+        bars["distance_to_vah"] = (bars["close"] - prior_profile["vah"]) / tick_size
     else:
         bars["distance_to_poc"] = np.nan
         bars["distance_to_val"] = np.nan
         bars["distance_to_vah"] = np.nan
 
-    # --- Regime via ADX ---
+    # --- Regime via ADX (computed within this session only) ---
     bars["adx"] = compute_adx(bars, feat_cfg["regime_adx_period"])
     bars["regime"] = np.where(
         bars["adx"] >= feat_cfg["regime_adx_trend_threshold"], "trending", "ranging"
@@ -98,6 +107,26 @@ def compute_features_for_symbol(bars: pd.DataFrame, profile_row: dict,
     bars.loc[bars["adx"].isna(), "regime"] = None
 
     return bars
+
+
+def compute_features_for_symbol(bars: pd.DataFrame, profiles_by_date: dict,
+                                 tick_size: float, cfg: dict) -> pd.DataFrame:
+    """
+    profiles_by_date: {session_date (date): {"poc":.., "vah":.., "val":..}}
+    for every session available for this symbol. Each bar looks up the most
+    recent profile dated strictly BEFORE its own session date.
+    """
+    bars = bars.sort_values("bar_ts").reset_index(drop=True)
+    session_dates = bars["bar_ts"].dt.date
+    profile_dates_sorted = sorted(profiles_by_date.keys())
+
+    out_frames = []
+    for session_date, day_bars in bars.groupby(session_dates):
+        prior_dates = [d for d in profile_dates_sorted if d < session_date]
+        prior_profile = profiles_by_date[prior_dates[-1]] if prior_dates else None
+        out_frames.append(_compute_session_features(day_bars, prior_profile, tick_size, cfg))
+
+    return pd.concat(out_frames, ignore_index=True) if out_frames else bars.iloc[0:0]
 
 
 def run_feature_engine(con: duckdb.DuckDBPyConnection, cfg: dict):
@@ -109,28 +138,37 @@ def run_feature_engine(con: duckdb.DuckDBPyConnection, cfg: dict):
         if bars.empty:
             continue
 
-        session_date = bars["bar_ts"].dt.date.iloc[0]
-        profile = con.execute("""
-            SELECT poc, vah, val FROM session_profile
-            WHERE symbol = ? AND session_date = ?
-        """, [symbol, session_date]).fetchdf()
-        profile_row = profile.iloc[0].to_dict() if not profile.empty else None
+        profiles = con.execute("""
+            SELECT session_date, poc, vah, val FROM session_profile WHERE symbol = ?
+        """, [symbol]).fetchdf()
+        profiles_by_date = {
+            pd.Timestamp(row["session_date"]).date(): {"poc": row["poc"], "vah": row["vah"], "val": row["val"]}
+            for _, row in profiles.iterrows()
+        }
 
-        feats = compute_features_for_symbol(bars, profile_row, tick_size, cfg)
+        feats = compute_features_for_symbol(bars, profiles_by_date, tick_size, cfg)
+        if feats.empty:
+            continue
 
         rows = feats[[
             "symbol", "bar_ts", "cvd", "cvd_slope", "absorption_flag", "absorption_side",
             "distance_to_poc", "distance_to_val", "distance_to_vah", "adx", "regime", "rel_volume"
         ]].copy()
         rows["symbol"] = symbol
-        con.executemany("""
+        # Vectorized insert via DataFrame — executemany() is row-by-row in DuckDB
+        # and doesn't scale once you're processing weeks/months of bars.
+        con.execute("""
             INSERT INTO features (symbol, bar_ts, cvd, cvd_slope, absorption_flag,
                                    absorption_side, distance_to_poc, distance_to_val,
                                    distance_to_vah, adx, regime, rel_volume)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, rows.values.tolist())
+            SELECT symbol, bar_ts, cvd, cvd_slope, absorption_flag, absorption_side,
+                   distance_to_poc, distance_to_val, distance_to_vah, adx, regime, rel_volume
+            FROM rows
+        """)
         n_absorption = int(feats["absorption_flag"].sum())
-        print(f"  {symbol}: {len(feats)} bars processed, {n_absorption} absorption events flagged")
+        n_days = feats["bar_ts"].dt.date.nunique()
+        print(f"  {symbol}: {len(feats)} bars processed across {n_days} session(s), "
+              f"{n_absorption} absorption events flagged")
 
 
 if __name__ == "__main__":
