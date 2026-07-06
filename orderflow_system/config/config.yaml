@@ -1,0 +1,68 @@
+# ============================================================
+# Order Flow Trading System — Central Configuration
+# Change values here. You should rarely need to touch code.
+# ============================================================
+
+symbols:
+  - name: "NQ"
+    exchange: "CME"
+    tick_size: 0.25
+    point_value: 20.0        # $ per full point move, 1 contract
+  - name: "GC"
+    exchange: "COMEX"
+    tick_size: 0.10
+    point_value: 100.0
+
+data:
+  # "synthetic" for testing without real data.
+  # switch to "databento" or "ibkr" once you're running this on your own machine
+  # with real credentials and network access.
+  source: "synthetic"
+  bar_interval_seconds: 60      # feature bars are built on 1-min aggregation of ticks
+  session_start_utc: "13:30"    # adjust to your traded session (example: US day session)
+  session_end_utc: "20:00"
+
+database:
+  path: "database/orderflow.duckdb"
+
+features:
+  cvd_lookback_bars: 20
+  absorption_volume_multiple: 2.0   # volume must be >= 2x rolling avg to flag absorption
+  absorption_max_price_move_ticks: 3 # price must move <= this many ticks despite the volume
+  volume_profile_lookback_bars: 390  # ~1 session at 1-min bars
+  regime_adx_period: 14
+  regime_adx_trend_threshold: 25     # ADX above this = trending regime
+
+strategy:
+  # This is the ONE edge hypothesis for V1. Do not add more strategies
+  # until this one has a statistically meaningful paper track record.
+  name: "val_absorption_reversal"
+  description: >
+    Price reaches prior session's Value Area Low (VAL) or Value Area High (VAH),
+    delta shows exhaustion/divergence against the move, volume spikes 2x+ average
+    with minimal further price movement (absorption), suggesting passive limit
+    orders are stopping the move. Enter counter to the exhausted direction.
+  min_risk_reward: 2.0
+  stop_buffer_ticks: 4          # stop placed this many ticks beyond the absorption zone
+
+decision_engine:
+  provider: "gemini"            # only provider wired up in V1 (you have API access)
+  model: "gemini-2.5-flash"
+  temperature: 0.0              # minimize randomness in trade decisions
+  max_output_tokens: 500
+  no_trade_is_default: true     # engine must be conservative; no_trade unless setup is clear
+
+risk:
+  account_size_paper: 100000.0
+  risk_per_trade_pct: 0.5       # % of account risked per trade during paper phase
+  max_daily_trades: 5
+  max_daily_loss_pct: 2.0       # circuit breaker: stop trading for the day past this loss
+
+alerts:
+  telegram_enabled: false       # flip on once you add bot token + chat id below
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+
+journal:
+  path: "journal/trades.duckdb"
+  log_every_decision: true      # log no_trade decisions too, not just executed trades
