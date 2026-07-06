@@ -32,6 +32,7 @@ from live.decision_engine import decide
 from live.risk_engine import size_position
 from live.paper_executor import simulate_execution
 from journal.journal import init_journal, log_decision, summary_report
+from alerts.telegram import send_telegram_message, format_decision_message, format_summary_message
 
 
 def run_pipeline():
@@ -103,8 +104,17 @@ def run_pipeline():
             print()
             print(f"    reasoning: {decision.reasoning}")
 
+            # Only push actual trades to Telegram, not every no_trade pass —
+            # no_trade decisions are still logged to the journal above, just
+            # not worth a phone notification for each one.
+            if decision.trade != "no_trade":
+                send_telegram_message(
+                    format_decision_message(symbol, row_dict["bar_ts"], decision, sizing, outcome), cfg
+                )
+
     print()
-    summary_report(journal_con)
+    stats = summary_report(journal_con)
+    send_telegram_message(format_summary_message(stats), cfg)
 
     con.close()
     journal_con.close()

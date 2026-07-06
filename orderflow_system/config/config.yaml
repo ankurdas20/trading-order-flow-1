@@ -60,9 +60,9 @@ risk:
   max_daily_loss_pct: 2.0       # circuit breaker: stop trading for the day past this loss
 
 alerts:
-  telegram_enabled: false       # flip on once you add bot token + chat id below
-  telegram_bot_token: ""
-  telegram_chat_id: ""
+  telegram_enabled: true        # safe to leave on: no-ops with a log line if token/chat_id are unset
+  telegram_bot_token: ""        # leave blank here and set via TELEGRAM_BOT_TOKEN env var / GitHub secret instead
+  telegram_chat_id: ""          # leave blank here and set via TELEGRAM_CHAT_ID env var / GitHub secret instead
 
 journal:
   path: "journal/trades.duckdb"

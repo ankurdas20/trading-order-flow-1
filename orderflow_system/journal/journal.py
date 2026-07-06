@@ -75,23 +75,37 @@ def log_decision(con: duckdb.DuckDBPyConnection, symbol, bar_ts, candidate_direc
     return next_id
 
 
-def summary_report(con: duckdb.DuckDBPyConnection):
+def get_summary_stats(con: duckdb.DuckDBPyConnection) -> dict:
+    """Same numbers summary_report() prints, returned as a dict so other
+    interfaces (Telegram, dashboard) don't have to re-query or re-derive them."""
     total = con.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
     traded = con.execute("SELECT COUNT(*) FROM decisions WHERE trade != 'no_trade'").fetchone()[0]
     wins = con.execute("SELECT COUNT(*) FROM decisions WHERE outcome = 'target'").fetchone()[0]
     losses = con.execute("SELECT COUNT(*) FROM decisions WHERE outcome = 'stop'").fetchone()[0]
     total_pnl = con.execute("SELECT COALESCE(SUM(pnl_dollars), 0) FROM decisions").fetchone()[0]
     avg_conf_traded = con.execute("SELECT AVG(confidence) FROM decisions WHERE trade != 'no_trade'").fetchone()[0]
+    return {
+        "total": total,
+        "traded": traded,
+        "wins": wins,
+        "losses": losses,
+        "total_pnl": total_pnl,
+        "win_rate": (wins / traded * 100) if traded > 0 else 0.0,
+        "avg_confidence": avg_conf_traded if avg_conf_traded is not None else 0.0,
+    }
 
+
+def summary_report(con: duckdb.DuckDBPyConnection) -> dict:
+    stats = get_summary_stats(con)
     print("=== Journal Summary ===")
-    print(f"  Total decisions logged: {total}")
-    print(f"  Trades taken: {traded}  (no_trade: {total - traded})")
-    print(f"  Wins (target hit): {wins}  Losses (stop hit): {losses}")
-    if traded > 0:
-        win_rate = wins / traded * 100
-        print(f"  Win rate: {win_rate:.1f}%")
-        print(f"  Avg confidence on traded setups: {avg_conf_traded:.1f}")
-    print(f"  Total paper P&L: ${total_pnl:.2f}")
+    print(f"  Total decisions logged: {stats['total']}")
+    print(f"  Trades taken: {stats['traded']}  (no_trade: {stats['total'] - stats['traded']})")
+    print(f"  Wins (target hit): {stats['wins']}  Losses (stop hit): {stats['losses']}")
+    if stats["traded"] > 0:
+        print(f"  Win rate: {stats['win_rate']:.1f}%")
+        print(f"  Avg confidence on traded setups: {stats['avg_confidence']:.1f}")
+    print(f"  Total paper P&L: ${stats['total_pnl']:.2f}")
+    return stats
 
 
 if __name__ == "__main__":

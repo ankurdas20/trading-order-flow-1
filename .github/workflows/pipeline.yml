@@ -1,0 +1,104 @@
+name: Order flow pipeline (run + alert + dashboard)
+
+# This is the "always-on, free, any-device" piece: GitHub runs this for you
+# on a schedule, at no cost, so you don't need a server or your laptop to
+# stay on. Results reach you two ways, both viewable from phone or laptop
+# with nothing installed beyond what you already have:
+#   1. Telegram message for every trade decision + a run summary
+#   2. A dashboard published to GitHub Pages (a free webpage GitHub hosts)
+#
+# One-time manual setup (no coding, ~5 minutes total):
+#   1. Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
+#   2. Settings -> Secrets and variables -> Actions -> New repository secret,
+#      add: GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#      (see orderflow_system/alerts/telegram.py for how to get the Telegram
+#      values; all are optional - the pipeline runs fine without them, you
+#      just won't get live decisions or phone alerts).
+#   3. To turn on fully automated runs during market hours, uncomment the
+#      `schedule:` block below. Left commented by default because right now
+#      data.source is still "synthetic" (see orderflow_system/README.md) -
+#      running this on a timer before real data is wired up just fills your
+#      journal/dashboard with synthetic-data noise, not real signals.
+#
+# You can always trigger a run manually from your phone: open this repo in
+# the GitHub app or mobile browser -> Actions -> this workflow -> Run workflow.
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   # every 15 minutes, 13:30-20:00 UTC (US day session), weekdays only.
+  #   # adjust to your traded session - see config.yaml session_start/end_utc.
+  #   - cron: "*/15 13-20 * * 1-5"
+
+permissions:
+  contents: write   # to commit journal/database updates to the bot-data branch
+  pages: write       # to publish the dashboard
+  id-token: write    # required by the Pages deploy action
+
+concurrency:
+  group: pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orderflow_system
+    steps:
+      - name: Check out source (main)
+        uses: actions/checkout@v4
+
+      - name: Restore journal/database from bot-data branch (if it exists)
+        run: |
+          if git ls-remote --exit-code --heads origin bot-data > /dev/null 2>&1; then
+            git fetch origin bot-data
+            git checkout origin/bot-data -- orderflow_system/database orderflow_system/journal 2>/dev/null || true
+            echo "Restored prior journal/database state from bot-data branch."
+          else
+            echo "No bot-data branch yet - this will be the first run."
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: orderflow_system/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 main.py
+
+      - name: Generate dashboard
+        run: python3 -m dashboard.generate
+
+      - name: Persist journal/database to bot-data branch
+        run: |
+          git config user.name "orderflow-bot"
+          git config user.email "orderflow-bot@users.noreply.github.com"
+          git add -f database/orderflow.duckdb journal/trades.duckdb 2>/dev/null || true
+          git commit -m "Update journal/database [skip ci]" || echo "Nothing to commit"
+          git push origin HEAD:bot-data
+
+      - name: Upload dashboard for Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: orderflow_system/dashboard
+
+  deploy-dashboard:
+    needs: run-pipeline
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

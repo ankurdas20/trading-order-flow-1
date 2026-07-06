@@ -27,6 +27,9 @@ That's the one thing only you can do, on your own machine.
 | Trade journal | `journal/journal.py` | ✅ logs every decision + outcome, generates summary |
 | Walk-forward backtest | `backtest/engine.py` | ✅ runs the full pipeline across N synthetic sessions, splits into chronological folds, reports an overfitting-style verdict |
 | Full orchestrator | `main.py` | ✅ ran end-to-end, produced a complete journaled run |
+| Telegram alerts | `alerts/telegram.py` | ✅ sends trade decisions + run summaries; silently no-ops if not configured |
+| Mobile dashboard | `dashboard/generate.py` | ✅ generates a single static, self-contained `dashboard/index.html` (screenshotted on both phone and desktop widths) |
+| Free 24/7 automation | `.github/workflows/pipeline.yml` | ✅ scheduled/on-demand GitHub Actions run — no server, no cost |
 
 **Update since the initial build:** the feature engine was fixing a real bug — it was
 using the CURRENT (still-forming) session's own volume profile as a feature, which is
@@ -37,6 +40,57 @@ edge hypothesis in `config.yaml` ("price reaches prior session's VAL/VAH"). This
 reference) — defaulted to 2. The synthetic generator was also updated to plant each
 day's absorption events near the previous day's actual VAL/VAH (instead of an arbitrary
 offset from that day's own price), so the edge still has something real to fire on.
+
+## Using this from your phone or laptop — no coding, no server to pay for
+
+You don't need to touch a terminal, Python, or config files to use this
+day-to-day. The setup below makes GitHub itself the "always-on computer" (its
+free scheduled-jobs feature, GitHub Actions) and Telegram + a webpage the
+interface — both look identical on phone and laptop.
+
+**One-time setup (~5 minutes, all clicking/typing into forms, zero code):**
+
+1. **Create a Telegram bot** (this is what sends you alerts): open Telegram,
+   message **@BotFather**, send `/newbot`, follow the prompts. It gives you a
+   *bot token*. Then send your new bot any message once, and visit
+   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser to find
+   your numeric *chat id* in the reply. Full detail in `alerts/telegram.py`.
+2. **Add your secrets to GitHub** (so the automation can use them without
+   them ever appearing in code): in this repo, go to **Settings → Secrets and
+   variables → Actions → New repository secret**, and add:
+   `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. All optional —
+   without them the pipeline still runs, just without live AI decisions or
+   phone alerts.
+3. **Turn on the dashboard webpage**: **Settings → Pages → Build and
+   deployment → Source: "GitHub Actions"**. One dropdown, no code.
+4. **Run it**: open the **Actions** tab (works fine in the GitHub mobile app
+   too) → "Order flow pipeline" → **Run workflow**. A few minutes later:
+   trade alerts appear in your Telegram chat, and your dashboard is live at
+   `https://<your-username>.github.io/<this-repo>/`.
+
+That's the whole loop, forever, without opening a terminal again: tap "Run
+workflow" on your phone (or wait for the schedule once you turn it on),
+read alerts in Telegram, check the dashboard link — both native to any
+device, nothing to install.
+
+**Why this is free:** GitHub Actions gives every repo free scheduled-job
+minutes, GitHub Pages hosting is free, and Telegram's API is free. Nothing
+here needs a paid server or a new account beyond GitHub + Telegram, which you
+already effectively have.
+
+**Two honest limits of this "runs anywhere for free" approach:**
+- The `schedule:` trigger in `.github/workflows/pipeline.yml` is commented
+  out by default, because right now `data.source` is still `"synthetic"` —
+  running a timer before real data is wired up just fills your dashboard and
+  phone with synthetic-data noise, not real signals. Uncomment it once
+  Databento is connected (see below).
+- **IBKR doesn't fit this model.** Its API needs TWS/Gateway logged in and
+  running continuously on one specific computer — that's fundamentally
+  different from "a free scheduled job runs anywhere." So the automated,
+  phone-accessible path in this README is built around **Databento** (a pure
+  API, works headless, fits GitHub Actions fine). IBKR paper trading remains
+  possible, just as a separate manual/local-only path you'd run from your
+  own machine when you're at it — not part of the automated loop.
 
 ## The one edge this system trades (V1)
 
@@ -126,16 +180,19 @@ overfitting with extra steps.
    often real candidates actually occur, and what the walk-forward verdict
    says on real history — synthetic data was tuned to produce events, real
    markets won't be so cooperative.
-2. **Wire up IBKR paper account** for live tick ingestion during market hours,
-   replacing the synthetic generator, and run `main.py` on a schedule (e.g.
-   every 1-5 minutes) instead of once.
-3. **Add Telegram alerting** (`alerts/` folder is scaffolded but empty) so you
-   get notified in real time instead of watching a terminal.
-4. **Paper trade for real, for weeks** — 100 trades minimum before drawing any
+2. **Uncomment the `schedule:` block** in `.github/workflows/pipeline.yml` so
+   it runs automatically during market hours instead of only on manual
+   trigger — Telegram alerts and the dashboard update themselves from there.
+3. **Paper trade for real, for weeks** — 100 trades minimum before drawing any
    conclusion about whether this edge (or the AI's judgment on it) is any good.
-5. **Only then** consider a second strategy, an ensemble/ranking layer, or a
-   dashboard. Multiplying complexity before step 4 is exactly how these
-   projects die — twenty untested strategies is not better than one tested one.
+4. **Only then** consider a second strategy, an ensemble/ranking layer, or a
+   richer dashboard. Multiplying complexity before step 3 is exactly how
+   these projects die — twenty untested strategies is not better than one
+   tested one.
+
+(Telegram alerting and the dashboard are done — see "Using this from your
+phone or laptop" above. IBKR live paper trading is intentionally not part of
+the automated path; see the limits noted there.)
 
 ## Common mistakes this build deliberately avoids
 
